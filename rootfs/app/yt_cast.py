@@ -9,6 +9,7 @@ import subprocess
 import threading
 import time
 from typing import Any, Callable, Dict, Optional
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -312,11 +313,9 @@ class YouTubeCastService:
                     self.gsession_id = gsid_match.group(1)
                 logger.info(f"YouTube Lounge 바인드 세션 수립 완료 (SID: {self.session_id}, GSID: {self.gsession_id[:8]}...)")
 
-            # 실시간 명령 수신 롱폴링 리스너 스레드 시작
+            # 실시간 명령 수신 BrowserChannel Back-channel (GET RID=rpc) 스레드 시작
             if self.session_id and self.gsession_id:
-                if self._lounge_listener_thread and self._lounge_listener_thread.is_alive():
-                    pass
-                else:
+                if not (self._lounge_listener_thread and self._lounge_listener_thread.is_alive()):
                     self._lounge_listener_thread = threading.Thread(target=self._lounge_listen_worker, daemon=True)
                     self._lounge_listener_thread.start()
 
@@ -324,49 +323,116 @@ class YouTubeCastService:
             logger.debug(f"Lounge 바인드 초기화 오류: {e}")
 
     def _lounge_listen_worker(self):
-        """구글 서버로부터 스마트폰의 재생/정지/곡전환(setPlaylist) 명령을 실시간 수신"""
-        logger.info("YouTube Lounge 실시간 명령 리스너 루프 시작")
-        rid = 1
+        """BrowserChannel Back-channel (GET RID=rpc)으로 스마트폰 명령을 실시간 스트리밍 수신"""
+        logger.info("YouTube Lounge Back-channel 실시간 명령 리스너 시작 (GET RID=rpc)")
+        aid = 2
+        forward_rid = 1
 
         while self._running and self.session_id and self.gsession_id:
             try:
-                bind_url = (
-                    f"{LOUNGE_BC_URL}?RID={rid}&SID={self.session_id}&VER=8&CVER=1"
-                    f"&gsessionid={self.gsession_id}&type=xmlhttp"
-                )
+                listen_params = {
+                    "device": "LOUNGE_SCREEN",
+                    "id": self.screen_id,
+                    "name": self.speaker_name,
+                    "app": "lb",
+                    "mdx-version": "3",
+                    "theme": "cl",
+                    "capabilities": "dsp,mic,dpa",
+                    "RID": "rpc",
+                    "SID": self.session_id,
+                    "gsessionid": self.gsession_id,
+                    "CI": "0",
+                    "AID": str(aid),
+                    "TYPE": "xmlhttp",
+                    "VER": "8",
+                    "CVER": "1",
+                }
+                bind_url = f"{LOUNGE_BC_URL}?" + urllib.parse.urlencode(listen_params)
                 req = urllib.request.Request(
                     bind_url,
-                    data=b"count=0",
                     headers={
                         "User-Agent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0) AppleWebkit/537.36",
-                        "Content-Type": "application/x-www-form-urlencoded",
                         "X-YouTube-LoungeId-Token": self.lounge_token,
                     },
                 )
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    chunk = resp.read().decode("utf-8", errors="ignore")
-                    if chunk:
-                        # setPlaylist 또는 videoId 탐색
-                        vid_match = re.search(r'["\']videoId["\']:\s*["\']([a-zA-Z0-9_-]{11})["\']', chunk)
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    buffer = ""
+                    for raw_line in resp:
+                        if not self._running:
+                            break
+                        line = raw_line.decode("utf-8", errors="ignore").strip()
+                        if not line:
+                            continue
+                        buffer += line
+
+                        # AID 번호 추출
+                        aid_matches = re.findall(r'\[(\d+),\[', line)
+                        if aid_matches:
+                            aid = max(aid, int(aid_matches[-1]))
+
+                        # setPlaylist / videoId 탐색
+                        if "videoId" in line or "setPlaylist" in line or "pause" in line or "stopVideo" in line:
+                            logger.info(f"[Lounge 이벤트 수신] {line[:200]}")
+
+                        vid_match = re.search(r'["\']videoId["\']\s*:\s*["\']([a-zA-Z0-9_-]{11})["\']', line)
                         if vid_match:
                             vid = vid_match.group(1)
-                            logger.info(f"스마트폰으로부터 YouTube 곡 재생 명령 수신: videoId={vid}")
+                            logger.info(f"스마트폰으로부터 YouTube 재생 명령 수신 -> videoId={vid}")
                             self.play_youtube_url_or_id(vid)
-
-                        # stop/pause 탐색
-                        elif '"stop"' in chunk or '"pause"' in chunk:
-                            logger.info("스마트폰으로부터 일시정지 명령 수신")
+                            # 스마트폰 UI에 재생 중 상태(state=1) 회신
+                            self._send_lounge_state(forward_rid, vid, state=1)
+                            forward_rid += 1
+                        elif '"pause"' in line or '"stopVideo"' in line:
+                            logger.info("스마트폰으로부터 일시정지/중지 명령 수신")
                             self.stop_playback()
-
-                rid += 1
+                            if self.current_video_id:
+                                self._send_lounge_state(forward_rid, self.current_video_id, state=2)
+                                forward_rid += 1
+                        elif '"play"' in line and self.current_video_id:
+                            logger.info("스마트폰으로부터 재개(play) 명령 수신")
+                            self.play_youtube_url_or_id(self.current_video_id)
+                            self._send_lounge_state(forward_rid, self.current_video_id, state=1)
+                            forward_rid += 1
 
             except socket.timeout:
-                rid += 1
                 continue
-            except Exception as e:
-                logger.debug(f"Lounge 리스너 루프 타임아웃/재연결: {e}")
+            except urllib.error.HTTPError as he:
+                logger.warning(f"Lounge Back-channel HTTP 오류 ({he.code}): 세션 재수립")
+                if he.code in (400, 401, 404, 410):
+                    break
                 time.sleep(2)
-                rid += 1
+            except Exception as e:
+                logger.debug(f"Lounge Back-channel 재연결 대기: {e}")
+                time.sleep(2)
+
+    def _send_lounge_state(self, rid: int, video_id: str, state: int = 1):
+        """스마트폰 UI에 현재 재생 상태(1: 재생중, 2: 일시정지)를 알려 컨트롤 활성화"""
+        try:
+            url = (
+                f"{LOUNGE_BC_URL}?RID={rid}&SID={self.session_id}&VER=8&CVER=1"
+                f"&gsessionid={self.gsession_id}"
+            )
+            payload = urllib.parse.urlencode({
+                "count": "1",
+                "req0__sc": "onStateChange",
+                "req0_currentTime": "0",
+                "req0_state": str(state),
+                "req0_duration": "200",
+                "req0_cpn": "asb_cast",
+                "req0_videoId": video_id,
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                url,
+                data=payload,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0) AppleWebkit/537.36",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "X-YouTube-LoungeId-Token": self.lounge_token,
+                },
+            )
+            urllib.request.urlopen(req, timeout=5).read()
+        except Exception as e:
+            logger.debug(f"Lounge 상태 회신 오류: {e}")
 
     # --- yt-dlp & ffmpeg 오디오 스트림 추출 및 재생 ---
     def play_youtube_url_or_id(self, query: str) -> bool:
