@@ -398,6 +398,17 @@ async def background_audio_monitor():
         await asyncio.sleep(0.5)
 
 
+def handle_yt_audio_chunk(chunk: bytes):
+    """YouTube Cast / yt-dlp에서 생성된 PCM 청크를 직접 오디오 허브로 공급"""
+    is_audible = chunk.count(0) < len(chunk)
+    if is_audible:
+        runtime_state["last_audio_ts"] = time.monotonic()
+        runtime_state["active_source"] = "YouTube"
+        _preroll_buffer.append(chunk)
+        if _main_loop and _stream_subscribers:
+            _main_loop.call_soon_threadsafe(_broadcast_pcm_chunk, chunk)
+
+
 @app.on_event("startup")
 async def on_startup():
     global _main_loop, yt_service
@@ -406,17 +417,18 @@ async def on_startup():
     runtime_state["selected_speakers"] = load_selected_speakers()
     logger.info(f"Audio Stream Bridge 시작됨 (Host IP: {runtime_state['host_ip']}, Stream URL: {get_stream_url()})")
 
-    # 1. 3대 FIFO 오디오 리더 스레드 시작
+    # 1. 2대 FIFO 오디오 리더 스레드 시작 (AirPlay, DLNA)
     t = threading.Thread(target=_fifo_reader_thread, daemon=True)
     t.start()
     asyncio.create_task(background_audio_monitor())
 
-    # 2. YouTube Cast & DIAL 서비스 시작
+    # 2. YouTube Cast & DIAL 서비스 시작 (직접 메모리 오디오 브로드캐스트 콜백 등록)
     yt_service = YouTubeCastService(
         host_ip=runtime_state["host_ip"],
         http_port=8099,
         speaker_name=SPEAKER_NAME,
         device_uuid=DEVICE_UUID,
+        on_audio_chunk=handle_yt_audio_chunk,
     )
     yt_service.start()
 

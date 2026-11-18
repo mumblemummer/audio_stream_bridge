@@ -35,12 +35,14 @@ class YouTubeCastService:
         speaker_name: str = "Audio Stream Bridge",
         device_uuid: Optional[str] = None,
         on_playback_state_change: Optional[Callable[[Dict[str, Any]], None]] = None,
+        on_audio_chunk: Optional[Callable[[bytes], None]] = None,
     ):
         self.host_ip = host_ip
         self.http_port = http_port
         self.speaker_name = speaker_name
         self.device_uuid = device_uuid or str(uuid.uuid4())
         self.on_playback_state_change = on_playback_state_change
+        self.on_audio_chunk = on_audio_chunk
 
         self.screen_id: str = ""
         self.lounge_token: str = ""
@@ -340,7 +342,7 @@ class YouTubeCastService:
                     }
                     self._notify_state()
 
-                    # ffmpeg로 오디오 스트림을 읽어 실시간 44.1kHz 16-bit Stereo PCM 파이프로 디코딩
+                    # ffmpeg로 오디오 스트림을 읽어 실시간 44.1kHz 16-bit Stereo PCM을 표준 출력(pipe:1)으로 직접 획득
                     cmd = [
                         "ffmpeg",
                         "-reconnect", "1",
@@ -351,23 +353,33 @@ class YouTubeCastService:
                         "-acodec", "pcm_s16le",
                         "-ar", "44100",
                         "-ac", "2",
-                        "-y",
-                        FIFO_CAST,
+                        "pipe:1",
                     ]
-                    logger.info(f"ffmpeg 오디오 디코더 프로세스 실행: {' '.join(cmd[:6])} -> {FIFO_CAST}")
+                    logger.info(f"ffmpeg 오디오 디코더 실행: {' '.join(cmd[:6])} -> pipe:1")
                     self._ffmpeg_proc = subprocess.Popen(
                         cmd,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                        bufsize=65536,
                     )
 
-            if self._ffmpeg_proc:
-                _, stderr_data = self._ffmpeg_proc.communicate()
-                err_msg = stderr_data.decode("utf-8", errors="ignore")[-300:] if stderr_data else ""
-                logger.info(f"유튜브 오디오 스트림 재생 프로세스 종료 (Exit code: {self._ffmpeg_proc.returncode}, Err: {err_msg})")
+            # 백그라운드에서 ffmpeg stdout PCM 데이터를 직접 읽어 오디오 허브로 전송
+            proc = self._ffmpeg_proc
+            if proc and proc.stdout:
+                while self._running:
+                    chunk = proc.stdout.read(8192)
+                    if not chunk:
+                        break
+                    if self.on_audio_chunk:
+                        self.on_audio_chunk(chunk)
+
+                proc.wait()
+                logger.info(f"유튜브 오디오 스트림 재생 완료 (Exit code: {proc.returncode})")
                 with self._lock:
-                    self.current_metadata["is_playing"] = False
-                    self._notify_state()
+                    if self._ffmpeg_proc == proc:
+                        self.current_metadata["is_playing"] = False
+                        self._ffmpeg_proc = None
+                        self._notify_state()
 
         except Exception as e:
             logger.error(f"유튜브 오디오 재생 처리 실패: {e}")
