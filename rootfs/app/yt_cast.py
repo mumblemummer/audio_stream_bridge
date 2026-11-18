@@ -61,6 +61,7 @@ class YouTubeCastService:
 
         self._ssdp_thread: Optional[threading.Thread] = None
         self._lounge_thread: Optional[threading.Thread] = None
+        self._lounge_listener_thread: Optional[threading.Thread] = None
         self._ffmpeg_proc: Optional[subprocess.Popen] = None
         self._running = False
         self._lock = threading.RLock()
@@ -277,7 +278,7 @@ class YouTubeCastService:
                 time.sleep(10)
 
     def _init_lounge_bind_session(self):
-        """Lounge 화면 바인드 세션을 등록하여 스마트폰이 연결되도록 대기"""
+        """Lounge 화면 바인드 세션을 등록하고 실시간 명령 청취 리스너 구동"""
         try:
             params = {
                 "device": "LOUNGE_SCREEN",
@@ -303,7 +304,6 @@ class YouTubeCastService:
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
                 body = resp.read().decode("utf-8", errors="ignore")
-                # sid 추출: [0,["c","240FF...","",8]]
                 sid_match = re.search(r'\[0,\["c","([A-Za-z0-9_-]+)"', body)
                 gsid_match = re.search(r'\[1,\["S","([A-Za-z0-9_-]+)"', body)
                 if sid_match:
@@ -312,8 +312,61 @@ class YouTubeCastService:
                     self.gsession_id = gsid_match.group(1)
                 logger.info(f"YouTube Lounge 바인드 세션 수립 완료 (SID: {self.session_id}, GSID: {self.gsession_id[:8]}...)")
 
+            # 실시간 명령 수신 롱폴링 리스너 스레드 시작
+            if self.session_id and self.gsession_id:
+                if self._lounge_listener_thread and self._lounge_listener_thread.is_alive():
+                    pass
+                else:
+                    self._lounge_listener_thread = threading.Thread(target=self._lounge_listen_worker, daemon=True)
+                    self._lounge_listener_thread.start()
+
         except Exception as e:
             logger.debug(f"Lounge 바인드 초기화 오류: {e}")
+
+    def _lounge_listen_worker(self):
+        """구글 서버로부터 스마트폰의 재생/정지/곡전환(setPlaylist) 명령을 실시간 수신"""
+        logger.info("YouTube Lounge 실시간 명령 리스너 루프 시작")
+        rid = 1
+
+        while self._running and self.session_id and self.gsession_id:
+            try:
+                bind_url = (
+                    f"{LOUNGE_BC_URL}?RID={rid}&SID={self.session_id}&VER=8&CVER=1"
+                    f"&gsessionid={self.gsession_id}&type=xmlhttp"
+                )
+                req = urllib.request.Request(
+                    bind_url,
+                    data=b"count=0",
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0) AppleWebkit/537.36",
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "X-YouTube-LoungeId-Token": self.lounge_token,
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    chunk = resp.read().decode("utf-8", errors="ignore")
+                    if chunk:
+                        # setPlaylist 또는 videoId 탐색
+                        vid_match = re.search(r'["\']videoId["\']:\s*["\']([a-zA-Z0-9_-]{11})["\']', chunk)
+                        if vid_match:
+                            vid = vid_match.group(1)
+                            logger.info(f"스마트폰으로부터 YouTube 곡 재생 명령 수신: videoId={vid}")
+                            self.play_youtube_url_or_id(vid)
+
+                        # stop/pause 탐색
+                        elif '"stop"' in chunk or '"pause"' in chunk:
+                            logger.info("스마트폰으로부터 일시정지 명령 수신")
+                            self.stop_playback()
+
+                rid += 1
+
+            except socket.timeout:
+                rid += 1
+                continue
+            except Exception as e:
+                logger.debug(f"Lounge 리스너 루프 타임아웃/재연결: {e}")
+                time.sleep(2)
+                rid += 1
 
     # --- yt-dlp & ffmpeg 오디오 스트림 추출 및 재생 ---
     def play_youtube_url_or_id(self, query: str) -> bool:
