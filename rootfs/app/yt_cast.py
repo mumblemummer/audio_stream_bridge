@@ -63,7 +63,7 @@ class YouTubeCastService:
         self._lounge_thread: Optional[threading.Thread] = None
         self._ffmpeg_proc: Optional[subprocess.Popen] = None
         self._running = False
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def start(self):
         self._running = True
@@ -329,8 +329,9 @@ class YouTubeCastService:
 
                 logger.info(f"유튜브 오디오 추출 성공: [{title}] by [{author}] (ID: {video_id})")
 
+                self.stop_playback()
+
                 with self._lock:
-                    self.stop_playback()
                     self.current_video_id = video_id
                     self.current_metadata = {
                         "title": title,
