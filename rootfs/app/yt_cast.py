@@ -354,15 +354,17 @@ class YouTubeCastService:
                         "-y",
                         FIFO_CAST,
                     ]
+                    logger.info(f"ffmpeg 오디오 디코더 프로세스 실행: {' '.join(cmd[:6])} -> {FIFO_CAST}")
                     self._ffmpeg_proc = subprocess.Popen(
                         cmd,
                         stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
                     )
 
             if self._ffmpeg_proc:
-                self._ffmpeg_proc.wait()
-                logger.info("유튜브 오디오 스트림 재생 완료")
+                _, stderr_data = self._ffmpeg_proc.communicate()
+                err_msg = stderr_data.decode("utf-8", errors="ignore")[-300:] if stderr_data else ""
+                logger.info(f"유튜브 오디오 스트림 재생 프로세스 종료 (Exit code: {self._ffmpeg_proc.returncode}, Err: {err_msg})")
                 with self._lock:
                     self.current_metadata["is_playing"] = False
                     self._notify_state()
