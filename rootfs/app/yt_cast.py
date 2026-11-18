@@ -175,14 +175,43 @@ class YouTubeCastService:
 </root>"""
 
     def get_app_status_xml(self) -> str:
-        state_str = "running" if self.current_metadata.get("is_playing") else "stopped"
         return f"""<?xml version="1.0" encoding="UTF-8"?>
-<service xmlns="urn:dial-multiscreen-org:schemas:dial">
+<service xmlns="urn:dial-multiscreen-org:schemas:dial" dialVer="2.1">
   <name>YouTube</name>
   <options allowStop="true"/>
-  <state>{state_str}</state>
+  <state>running</state>
   <link rel="run" href="run"/>
+  <additionalData>
+    <brand>AudioStreamBridge</brand>
+    <model>ASB-2.0</model>
+    <screenId>{self.screen_id}</screenId>
+    <deviceId>{self.device_uuid}</deviceId>
+    <loungeToken>{self.lounge_token}</loungeToken>
+    <loungeTokenRefreshIntervalMs>1500000</loungeTokenRefreshIntervalMs>
+  </additionalData>
 </service>"""
+
+    def register_pairing_code_from_phone(self, pairing_code: str):
+        """스마트폰이 DIAL을 통해 보내온 pairingCode를 구글 Lounge 서버에 등록"""
+        try:
+            url = "https://www.youtube.com/api/lounge/pairing/register_pairing_code"
+            data = urllib.parse.urlencode({
+                "screen_id": self.screen_id,
+                "pairing_code": pairing_code,
+                "access_type": "permanent",
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                url,
+                data=data,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0) AppleWebkit/537.36",
+                    "X-YouTube-LoungeId-Token": self.lounge_token,
+                },
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                logger.info(f"스마트폰 pairingCode 구글 서버 등록 성공: {pairing_code}")
+        except Exception as e:
+            logger.debug(f"pairingCode 등록 오류: {e}")
 
     # --- YouTube Lounge TV 코드 발급 및 세션 루프 ---
     def _lounge_worker(self):

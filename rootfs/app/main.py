@@ -467,15 +467,24 @@ async def launch_dial_app(request: Request):
     """스마트폰 YouTube 앱에서 캐스트 버튼 클릭 시 앱 실행 및 페어링 수신"""
     body = await request.body()
     body_str = body.decode("utf-8", errors="ignore")
-    logger.info(f"DIAL YouTube 앱 실행 요청 수신 (Body: {body_str[:100]})")
+    logger.info(f"DIAL YouTube 앱 실행 요청 수신 (Body: {body_str[:120]})")
 
-    # body에 direct v= 또는 pairingCode 파싱
-    if "v=" in body_str:
-        import urllib.parse
-        parsed = urllib.parse.parse_qs(body_str)
-        vid = parsed.get("v", [None])[0]
-        if vid and yt_service:
-            yt_service.play_youtube_url_or_id(vid)
+    if yt_service:
+        # pairingCode 파싱
+        if "pairingCode=" in body_str:
+            import urllib.parse
+            parsed = urllib.parse.parse_qs(body_str)
+            p_code = parsed.get("pairingCode", [None])[0]
+            if p_code:
+                yt_service.register_pairing_code_from_phone(p_code)
+
+        # direct v= videoId 파싱
+        if "v=" in body_str:
+            import urllib.parse
+            parsed = urllib.parse.parse_qs(body_str)
+            vid = parsed.get("v", [None])[0]
+            if vid:
+                yt_service.play_youtube_url_or_id(vid)
 
     return Response(
         status_code=201,
