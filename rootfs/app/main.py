@@ -459,23 +459,26 @@ async def get_device_desc():
 
 
 @app.get("/apps/YouTube")
-async def get_dial_app_status():
-    """DIAL 표준 YouTube 앱 상태 반환"""
+@app.get("/apps/YouTubeMusic")
+async def get_dial_app_status(request: Request):
+    """DIAL 표준 YouTube / YouTubeMusic 앱 상태 반환"""
     if not yt_service:
         raise HTTPException(status_code=503, detail="Cast service initializing")
+    app_name = "YouTubeMusic" if "YouTubeMusic" in request.url.path else "YouTube"
     return Response(
-        content=yt_service.get_app_status_xml(),
+        content=yt_service.get_app_status_xml(app_name=app_name),
         media_type="application/xml",
         headers={"Access-Control-Allow-Origin": "*"},
     )
 
 
 @app.post("/apps/YouTube")
+@app.post("/apps/YouTubeMusic")
 async def launch_dial_app(request: Request):
-    """스마트폰 YouTube 앱에서 캐스트 버튼 클릭 시 앱 실행 및 페어링 수신"""
+    """스마트폰 YouTube / YouTube Music 앱에서 캐스트 버튼 클릭 시 앱 실행 및 페어링 수신"""
     body = await request.body()
     body_str = body.decode("utf-8", errors="ignore")
-    logger.info(f"DIAL YouTube 앱 실행 요청 수신 (Body: {body_str[:120]})")
+    logger.info(f"DIAL 앱 실행 요청 수신 ({request.url.path}, Body: {body_str[:120]})")
 
     if yt_service:
         # pairingCode 파싱
@@ -497,7 +500,7 @@ async def launch_dial_app(request: Request):
     return Response(
         status_code=201,
         headers={
-            "Location": f"http://{runtime_state['host_ip']}:8099/apps/YouTube/run",
+            "Location": f"http://{runtime_state['host_ip']}:8099{request.url.path}/run",
             "Access-Control-Allow-Origin": "*",
         },
     )
@@ -505,6 +508,8 @@ async def launch_dial_app(request: Request):
 
 @app.delete("/apps/YouTube/run")
 @app.delete("/apps/YouTube")
+@app.delete("/apps/YouTubeMusic/run")
+@app.delete("/apps/YouTubeMusic")
 async def stop_dial_app():
     """스마트폰 YouTube 캐스트 세션 종료"""
     if yt_service:

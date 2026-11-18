@@ -176,10 +176,10 @@ class YouTubeCastService:
   </device>
 </root>"""
 
-    def get_app_status_xml(self) -> str:
+    def get_app_status_xml(self, app_name: str = "YouTube") -> str:
         return f"""<?xml version="1.0" encoding="UTF-8"?>
 <service xmlns="urn:dial-multiscreen-org:schemas:dial" dialVer="2.1">
-  <name>YouTube</name>
+  <name>{app_name}</name>
   <options allowStop="true"/>
   <state>running</state>
   <link rel="run" href="run"/>
@@ -288,7 +288,7 @@ class YouTubeCastService:
                 "app": "lb",
                 "mdx-version": "3",
                 "theme": "cl",
-                "capabilities": "dsp,mic,dpa",
+                "capabilities": "dsp,mic,dpa,mus,que,atp,pas",
                 "RID": "0",
                 "VER": "8",
                 "CVER": "1",
@@ -337,7 +337,7 @@ class YouTubeCastService:
                     "app": "lb",
                     "mdx-version": "3",
                     "theme": "cl",
-                    "capabilities": "dsp,mic,dpa",
+                    "capabilities": "dsp,mic,dpa,mus,que,atp,pas",
                     "RID": "rpc",
                     "SID": self.session_id,
                     "gsessionid": self.gsession_id,
