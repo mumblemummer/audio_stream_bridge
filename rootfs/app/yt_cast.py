@@ -397,6 +397,17 @@ class YouTubeCastService:
                             if self.current_metadata.get("is_playing"):
                                 logger.info("스마트폰 캐스트 연결 해제 이벤트 수신 -> 재생 중지")
                                 self.stop_playback()
+                        elif '"getNowPlaying"' in line:
+                            self._send_lounge_command(forward_rid, "nowPlaying", {
+                                "currentTime": "0",
+                                "state": "-1",
+                            })
+                            forward_rid += 1
+                        elif '"getDiscoveryDeviceId"' in line:
+                            self._send_lounge_command(forward_rid, "onDiscoveryDeviceId", {
+                                "deviceId": self.device_uuid,
+                            })
+                            forward_rid += 1
                         elif '"play"' in line and self.current_video_id:
                             if not self.current_metadata.get("is_playing"):
                                 logger.info("스마트폰으로부터 재개(play) 명령 수신")
@@ -415,22 +426,21 @@ class YouTubeCastService:
                 logger.debug(f"Lounge Back-channel 재연결 대기: {e}")
                 time.sleep(2)
 
-    def _send_lounge_state(self, rid: int, video_id: str, state: int = 1):
-        """스마트폰 UI에 현재 재생 상태(1: 재생중, 2: 일시정지)를 알려 컨트롤 활성화"""
+    def _send_lounge_command(self, rid: int, cmd_name: str, extra_params: Dict[str, str]):
+        """구글 Lounge 서버로 임의의 TV 응답 커맨드 전송"""
         try:
             url = (
                 f"{LOUNGE_BC_URL}?RID={rid}&SID={self.session_id}&VER=8&CVER=1"
                 f"&gsessionid={self.gsession_id}"
             )
-            payload = urllib.parse.urlencode({
+            form_data = {
                 "count": "1",
-                "req0__sc": "onStateChange",
-                "req0_currentTime": "0",
-                "req0_state": str(state),
-                "req0_duration": "200",
-                "req0_cpn": "asb_cast",
-                "req0_videoId": video_id,
-            }).encode("utf-8")
+                "req0__sc": cmd_name,
+            }
+            for k, v in extra_params.items():
+                form_data[f"req0_{k}"] = v
+
+            payload = urllib.parse.urlencode(form_data).encode("utf-8")
             req = urllib.request.Request(
                 url,
                 data=payload,
@@ -442,7 +452,17 @@ class YouTubeCastService:
             )
             urllib.request.urlopen(req, timeout=5).read()
         except Exception as e:
-            logger.debug(f"Lounge 상태 회신 오류: {e}")
+            logger.debug(f"Lounge 커맨드({cmd_name}) 전송 오류: {e}")
+
+    def _send_lounge_state(self, rid: int, video_id: str, state: int = 1):
+        """스마트폰 UI에 현재 재생 상태(1: 재생중, 2: 일시정지)를 알려 컨트롤 활성화"""
+        self._send_lounge_command(rid, "onStateChange", {
+            "currentTime": "0",
+            "state": str(state),
+            "duration": "200",
+            "cpn": "asb_cast",
+            "videoId": video_id,
+        })
 
     # --- yt-dlp & ffmpeg 오디오 스트림 추출 및 재생 ---
     def play_youtube_url_or_id(self, query: str) -> bool:

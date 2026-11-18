@@ -1,6 +1,6 @@
 name: "Audio Stream Bridge"
 description: "YouTube Cast, AirPlay 및 DLNA 오디오 스트림을 수신하여 Home Assistant 및 Music Assistant 스피커로 실시간 중계하는 독립 오디오 브릿지"
-version: "2.1.0"
+version: "2.1.1"
 slug: "audio_stream_bridge"
 init: false
 arch:
