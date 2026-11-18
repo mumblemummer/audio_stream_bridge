@@ -10,6 +10,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional
 import urllib.parse
+import urllib.request
 import uuid
 
 import aiohttp
@@ -20,7 +21,8 @@ SSDP_ADDR = "239.255.255.250"
 SSDP_PORT = 1900
 FIFO_CAST = "/tmp/asb_fifo_cast"
 
-LOUNGE_TOKEN_URL = "https://www.youtube.com/api/lounge/pairing/generate_screen_id"
+LOUNGE_SCREEN_URL = "https://www.youtube.com/api/lounge/pairing/generate_screen_id"
+LOUNGE_TOKEN_URL = "https://www.youtube.com/api/lounge/pairing/get_lounge_token_batch"
 LOUNGE_CODE_URL = "https://www.youtube.com/api/lounge/pairing/get_pairing_code"
 LOUNGE_BC_URL = "https://www.youtube.com/api/lounge/bc/bind"
 
@@ -69,7 +71,7 @@ class YouTubeCastService:
         self._ssdp_thread = threading.Thread(target=self._ssdp_listener_worker, daemon=True)
         self._ssdp_thread.start()
 
-        # 2. YouTube Lounge TV 코드 발급 및 이벤트 루프 스레드 시작
+        # 2. YouTube Lounge TV 코드 발급 및 세션 바인딩 스레드 시작
         self._lounge_thread = threading.Thread(target=self._lounge_worker, daemon=True)
         self._lounge_thread.start()
 
@@ -182,52 +184,105 @@ class YouTubeCastService:
 
     # --- YouTube Lounge TV 코드 발급 및 세션 루프 ---
     def _lounge_worker(self):
-        """YouTube Lounge API에 Screen을 등록하고 12자리 TV 페어링 코드를 갱신하며 스마트폰 명령 대기"""
-        import urllib.request
-
+        """YouTube Lounge API에 Screen을 등록하고 12자리 TV 페어링 코드 발급 및 bind 수신"""
         while self._running:
             try:
-                # 1. Screen ID 및 Lounge Token 발급
-                req = urllib.request.Request(
-                    LOUNGE_TOKEN_URL,
+                # 1. Screen ID 발급 (plain text string)
+                req1 = urllib.request.Request(
+                    LOUNGE_SCREEN_URL,
                     data=b"",
                     headers={"User-Agent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0) AppleWebkit/537.36"},
                 )
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    self.screen_id = data.get("screenId", "")
-                    self.lounge_token = data.get("loungeToken", "")
+                with urllib.request.urlopen(req1, timeout=10) as resp:
+                    self.screen_id = resp.read().decode("utf-8").strip().replace('"', '')
 
                 if not self.screen_id:
-                    time.sleep(10)
+                    time.sleep(5)
                     continue
 
-                # 2. 12자리 TV 페어링 코드 발급
-                code_data = urllib.parse.urlencode({"screen_id": self.screen_id}).encode("utf-8")
-                code_req = urllib.request.Request(
+                # 2. Lounge Token 발급
+                tok_data = urllib.parse.urlencode({"screen_ids": self.screen_id}).encode("utf-8")
+                req2 = urllib.request.Request(
+                    LOUNGE_TOKEN_URL,
+                    data=tok_data,
+                    headers={"User-Agent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0) AppleWebkit/537.36"},
+                )
+                with urllib.request.urlopen(req2, timeout=10) as resp:
+                    tok_json = json.loads(resp.read().decode("utf-8"))
+                    screens = tok_json.get("screens", [])
+                    if screens:
+                        self.lounge_token = screens[0].get("loungeToken", "")
+
+                # 3. 12자리 TV 페어링 코드 발급
+                code_data = urllib.parse.urlencode({
+                    "screen_id": self.screen_id,
+                    "access_type": "permanent",
+                }).encode("utf-8")
+                req3 = urllib.request.Request(
                     LOUNGE_CODE_URL,
                     data=code_data,
                     headers={"User-Agent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0) AppleWebkit/537.36"},
                 )
-                with urllib.request.urlopen(code_req, timeout=10) as resp:
+                with urllib.request.urlopen(req3, timeout=10) as resp:
                     raw_code = resp.read().decode("utf-8").strip().replace('"', "")
-                    # 12자리 코드를 3자리씩 보기 좋게 포맷 (예: 123 456 789 012)
                     if len(raw_code) == 12:
                         self.pairing_code = f"{raw_code[0:3]} {raw_code[3:6]} {raw_code[6:9]} {raw_code[9:12]}"
                     else:
                         self.pairing_code = raw_code
-                    logger.info(f"YouTube TV 페어링 코드 발급됨: {self.pairing_code} (Screen ID: {self.screen_id[:8]}...)")
+                    logger.info(f"YouTube TV 페어링 코드 발급 성공: {self.pairing_code} (Screen ID: {self.screen_id})")
 
-                # TV 코드는 일반적으로 약 15~30분간 유효하므로 주기적으로 재갱신
-                # 백그라운드에서 주기적으로 대기 (페어링 코드는 UI를 통해 확인 가능)
-                for _ in range(60):
+                # 4. YouTube Lounge bc/bind 세션 초기화
+                if self.lounge_token:
+                    self._init_lounge_bind_session()
+
+                # TV 코드는 주기적으로 갱신 대기 (약 15분)
+                for _ in range(90):
                     if not self._running:
                         break
                     time.sleep(10)
 
             except Exception as e:
-                logger.debug(f"YouTube Lounge 세션 루프 오류: {e}")
+                logger.error(f"YouTube Lounge TV 코드 발급 오류: {e}")
                 time.sleep(10)
+
+    def _init_lounge_bind_session(self):
+        """Lounge 화면 바인드 세션을 등록하여 스마트폰이 연결되도록 대기"""
+        try:
+            params = {
+                "device": "LOUNGE_SCREEN",
+                "id": self.screen_id,
+                "name": self.speaker_name,
+                "app": "lb",
+                "mdx-version": "3",
+                "theme": "cl",
+                "capabilities": "dsp,mic,dpa",
+                "RID": "0",
+                "VER": "8",
+                "CVER": "1",
+            }
+            url = f"{LOUNGE_BC_URL}?" + urllib.parse.urlencode(params)
+            req = urllib.request.Request(
+                url,
+                data=b"count=0",
+                headers={
+                    "User-Agent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0) AppleWebkit/537.36",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "X-YouTube-LoungeId-Token": self.lounge_token,
+                },
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                body = resp.read().decode("utf-8", errors="ignore")
+                # sid 추출: [0,["c","240FF...","",8]]
+                sid_match = re.search(r'\[0,\["c","([A-Za-z0-9_-]+)"', body)
+                gsid_match = re.search(r'\[1,\["S","([A-Za-z0-9_-]+)"', body)
+                if sid_match:
+                    self.session_id = sid_match.group(1)
+                if gsid_match:
+                    self.gsession_id = gsid_match.group(1)
+                logger.info(f"YouTube Lounge 바인드 세션 수립 완료 (SID: {self.session_id}, GSID: {self.gsession_id[:8]}...)")
+
+        except Exception as e:
+            logger.debug(f"Lounge 바인드 초기화 오류: {e}")
 
     # --- yt-dlp & ffmpeg 오디오 스트림 추출 및 재생 ---
     def play_youtube_url_or_id(self, query: str) -> bool:
@@ -238,11 +293,9 @@ class YouTubeCastService:
 
     def _play_worker(self, query: str):
         target_url = query.strip()
-        # videoId 단독 입력인 경우 URL 형태로 보정
         if re.match(r"^[a-zA-Z0-9_-]{11}$", target_url):
             target_url = f"https://www.youtube.com/watch?v={target_url}"
         elif not target_url.startswith("http"):
-            # 검색어인 경우 ytsearch: 접두사 사용
             target_url = f"ytsearch1:{target_url}"
 
         try:
@@ -307,7 +360,6 @@ class YouTubeCastService:
                         stderr=subprocess.DEVNULL,
                     )
 
-            # ffmpeg 완료 대기
             if self._ffmpeg_proc:
                 self._ffmpeg_proc.wait()
                 logger.info("유튜브 오디오 스트림 재생 완료")
