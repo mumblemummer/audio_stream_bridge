@@ -377,11 +377,12 @@ class YouTubeCastService:
                         vid_match = re.search(r'["\']videoId["\']\s*:\s*["\']([a-zA-Z0-9_-]{11})["\']', line)
                         if vid_match:
                             vid = vid_match.group(1)
-                            logger.info(f"스마트폰으로부터 YouTube 재생 명령 수신 -> videoId={vid}")
-                            self.play_youtube_url_or_id(vid)
-                            # 스마트폰 UI에 재생 중 상태(state=1) 회신
-                            self._send_lounge_state(forward_rid, vid, state=1)
-                            forward_rid += 1
+                            if vid != self.current_video_id or not self.current_metadata.get("is_playing"):
+                                logger.info(f"스마트폰으로부터 YouTube 재생 명령 수신 -> videoId={vid}")
+                                self.play_youtube_url_or_id(vid)
+                                # 스마트폰 UI에 재생 중 상태(state=1) 회신
+                                self._send_lounge_state(forward_rid, vid, state=1)
+                                forward_rid += 1
                         elif '"pause"' in line or '"stopVideo"' in line:
                             logger.info("스마트폰으로부터 일시정지/중지 명령 수신")
                             self.stop_playback()
@@ -389,10 +390,11 @@ class YouTubeCastService:
                                 self._send_lounge_state(forward_rid, self.current_video_id, state=2)
                                 forward_rid += 1
                         elif '"play"' in line and self.current_video_id:
-                            logger.info("스마트폰으로부터 재개(play) 명령 수신")
-                            self.play_youtube_url_or_id(self.current_video_id)
-                            self._send_lounge_state(forward_rid, self.current_video_id, state=1)
-                            forward_rid += 1
+                            if not self.current_metadata.get("is_playing"):
+                                logger.info("스마트폰으로부터 재개(play) 명령 수신")
+                                self.play_youtube_url_or_id(self.current_video_id)
+                                self._send_lounge_state(forward_rid, self.current_video_id, state=1)
+                                forward_rid += 1
 
             except socket.timeout:
                 continue
@@ -491,9 +493,10 @@ class YouTubeCastService:
                     }
                     self._notify_state()
 
-                    # ffmpeg로 오디오 스트림을 읽어 실시간 44.1kHz 16-bit Stereo PCM을 표준 출력(pipe:1)으로 직접 획득
+                    # ffmpeg에 -re(실시간 1배속 페이싱)를 적용하여 1초 만에 디코딩 완료되어 끊기는 현상 방지
                     cmd = [
                         "ffmpeg",
+                        "-re",
                         "-reconnect", "1",
                         "-reconnect_streamed", "1",
                         "-reconnect_delay_max", "5",
