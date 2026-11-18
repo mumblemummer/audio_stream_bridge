@@ -398,6 +398,13 @@ async def background_audio_monitor():
         await asyncio.sleep(0.5)
 
 
+def handle_yt_state_change(meta: Dict[str, Any]):
+    """YouTube Cast 재생 종료/일시정지 시 스피커도 1초 내에 즉시 정지되도록 유도"""
+    if not meta.get("is_playing") and runtime_state["active_source"] == "YouTube":
+        # 5초 타임아웃 중 4초를 당겨서 1초 뒤 새 곡이 안 오면 즉시 정지
+        runtime_state["last_audio_ts"] = min(runtime_state["last_audio_ts"], time.monotonic() - 4.0)
+
+
 def handle_yt_audio_chunk(chunk: bytes):
     """YouTube Cast / yt-dlp에서 생성된 PCM 청크를 직접 오디오 허브로 공급"""
     is_audible = chunk.count(0) < len(chunk)
@@ -428,6 +435,7 @@ async def on_startup():
         http_port=8099,
         speaker_name=SPEAKER_NAME,
         device_uuid=DEVICE_UUID,
+        on_playback_state_change=handle_yt_state_change,
         on_audio_chunk=handle_yt_audio_chunk,
     )
     yt_service.start()

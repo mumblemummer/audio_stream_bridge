@@ -370,9 +370,9 @@ class YouTubeCastService:
                         if aid_matches:
                             aid = max(aid, int(aid_matches[-1]))
 
-                        # setPlaylist / videoId 탐색
-                        if "videoId" in line or "setPlaylist" in line or "pause" in line or "stopVideo" in line:
-                            logger.info(f"[Lounge 이벤트 수신] {line[:200]}")
+                        # Keep-alive([0,-1,0] 등) 이외의 모든 실제 Lounge 이벤트 로깅
+                        if "[" in line and not line.startswith("[0,-1"):
+                            logger.info(f"[Lounge 이벤트] {line[:250]}")
 
                         vid_match = re.search(r'["\']videoId["\']\s*:\s*["\']([a-zA-Z0-9_-]{11})["\']', line)
                         if vid_match:
@@ -380,7 +380,6 @@ class YouTubeCastService:
                             if vid != self.current_video_id or not self.current_metadata.get("is_playing"):
                                 logger.info(f"스마트폰으로부터 YouTube 재생 명령 수신 -> videoId={vid}")
                                 self.play_youtube_url_or_id(vid)
-                                # 스마트폰 UI에 재생 중 상태(state=1) 회신
                                 self._send_lounge_state(forward_rid, vid, state=1)
                                 forward_rid += 1
                         elif '"pause"' in line or '"stopVideo"' in line:
@@ -389,6 +388,15 @@ class YouTubeCastService:
                             if self.current_video_id:
                                 self._send_lounge_state(forward_rid, self.current_video_id, state=2)
                                 forward_rid += 1
+                        elif '"loungeStatus"' in line and "REMOTE_CONTROL" not in line:
+                            # 스마트폰(REMOTE_CONTROL)이 연결 해제를 눌러 방에서 나간 경우
+                            if self.current_metadata.get("is_playing"):
+                                logger.info("스마트폰 캐스트 연결 해제 감지 (loungeStatus) -> 재생 중지")
+                                self.stop_playback()
+                        elif '"remoteDisconnected"' in line or '"onRemoteDisconnected"' in line:
+                            if self.current_metadata.get("is_playing"):
+                                logger.info("스마트폰 캐스트 연결 해제 이벤트 수신 -> 재생 중지")
+                                self.stop_playback()
                         elif '"play"' in line and self.current_video_id:
                             if not self.current_metadata.get("is_playing"):
                                 logger.info("스마트폰으로부터 재개(play) 명령 수신")
